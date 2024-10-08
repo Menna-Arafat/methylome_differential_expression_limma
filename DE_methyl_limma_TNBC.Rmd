@@ -1,0 +1,180 @@
+---
+title: "Differential expression methylome with limma"
+author: "Menna Arafat"
+date:  "2024-9-02"
+output: html_document
+---
+
+## create output directory
+
+```{r}
+dir.create("output")
+```
+
+## load libraries
+
+```{r}
+ suppressPackageStartupMessages({ 
+library(limma)
+library(tibble)
+library(plyr)
+library(dplyr)
+library(tidyverse)
+library("pheatmap")
+library("dichromat")
+library("RColorBrewer")
+library(ComplexHeatmap)
+library(circlize)   
+ })
+```
+
+## load data
+
+```{r}
+data= read.csv("data/methyl_b_value.csv")
+
+#filtration process if necessary
+# count= data[1:100000,] %>% filter(., !is.na(gene_symbol) ) %>% 
+#                           filter(., !duplicated(gene_symbol) ) %>% 
+#                           filter(., rowSums(is.na(.)) < ncol(data)/2 ) %>% 
+#                           column_to_rownames("gene_symbol") %>% 
+#                           dplyr::select(-1)
+
+#colnames(count)= c(paste0("sample_", 1:110, "_Tumor"), paste0("sample_", 111:ncol(count), "_Normal"))
+```
+
+## impute missing values
+
+```{r}
+count= data %>% as.data.frame() %>% column_to_rownames("X")
+count_T = t(apply(count[1:110], 1, function(x) {
+                  x[is.na(x)] <- median(x, na.rm = TRUE)
+                  return(x)
+}))
+
+count_N = t(apply(count[111:249], 1, function(x) {
+                  x[is.na(x)] <- median(x, na.rm = TRUE)
+                  return(x)
+}))
+
+
+count= cbind(count_T, count_N)
+```
+
+## create metadata and design matrix  
+
+```{r}
+metadata= data.frame(sample= colnames(count),
+                     condition= ifelse(grepl("Tumor", colnames(count)), "Tumor", "Normal"))
+
+metadata$condition= factor(metadata$condition, levels = c("Normal", "Tumor"))
+design= model.matrix(~ metadata$condition) %>% as.data.frame()
+colnames(design)= gsub("metadata\\$condition", "",colnames(design) )
+```
+
+##  in case that we have beta value, transform it to M values
+##  beta_values= data %>% dplyr::select(where(is.numeric))
+##  M_values <- log2(beta_values / (1 - beta_values))
+##  count=  M_values
+##  Basis of limma voom variance stabilization
+##  The shrunken variance for gene \( i \) is calculated as:
+##    
+##    $$
+##    s_i^2 = \frac{d_0 s_0^2 + d_i \hat{\sigma}_i^2}{d_0 + d_i}
+##  $$
+## si= d0s0 + diσi / d0+di
+##  These parameters control the extent to which the gene-specific variances si
+##  are shrunk toward the pooled variance estimate s0
+## si  is the shrunken variance for gene 
+## σi (sigma i) is the raw variance estimate from the linear model for gene 
+##  s0 is the prior variance (average variance across all genes)
+##  d0 is the prior degrees of freedom (reflects how much information is borrowed from the prior)
+##  di is the degrees of freedom associated with gene i
+## Genes with noisy estimates (low di) have their variances more heavily shrunk towards the prior 
+##  Use voom to transform the raw counts and estimate mean-variance trend
+
+```{r}
+v <- voom(count, design)
+```
+
+##  Fit the linear model
+
+```{r}
+fit <- lmFit(v, design)
+```
+
+##  Apply empirical Bayes moderation with trend adjustment
+
+```{r}
+fit <- eBayes(fit, trend = TRUE)
+```
+
+## get coefficients
+
+```{r}
+coef(fit) %>% head()
+```
+
+##  Get the top differentially expressed genes
+
+```{r}
+topTable <- topTable(fit, coef = 2,number = Inf)
+sig= topTable[topTable$adj.P.Val < .01 & abs(topTable$logFC) > log2(1) ,]
+
+write.csv(sig, "output/DMGs.csv")
+```
+
+##  Get the results for a specific contrast
+##  coef(fit) %>% head()
+##  contrast <- makeContrasts(Tumor - Normal, levels = design)
+##  fit2 <- contrasts.fit(fit, contrast)
+##  fit2 <- eBayes(fit2)
+##  
+##  #' ##  Get the top differentially expressed genes
+##  topTable <- topTable(fit2, number = Inf)
+## heatmap
+
+```{r}
+count= as.data.frame(count)
+sig= topTable[topTable$adj.P.Val < .01 & abs(topTable$logFC) > log2(1.2) ,]
+heat_data = count[row.names(count) %in% row.names(sig),] 
+heat_data= scale(heat_data)
+
+
+ta <- HeatmapAnnotation(
+  Condition = metadata[, c("condition")],
+  col = list(
+    Condition = c("Tumor" = "#9400D3" , "Normal" = "darkolivegreen")
+    
+  ),
+  annotation_height = unit(10, "mm")
+)
+
+heatmap  <- Heatmap(
+  matrix = as.matrix(heat_data),
+  name = "Normalized Express.data",
+  col = colorRamp2(c(-3,0, 3), c( "grey36","lightyellow2" ,"#FFA500CC")),
+  show_row_names = TRUE,
+  cluster_rows = TRUE,
+  cluster_columns = TRUE,
+  show_column_names = FALSE,
+  top_annotation  = ta,
+  heatmap_legend_param = list(
+    title_gp = gpar(fontsize = 12),  #' ##  Title text size
+    labels_gp = gpar(fontsize = 12), #' ##  Labels text size
+    legend_height = unit(9, "cm"),   #' ##  Height of the legend
+    legend_width = unit(1.5, "cm")   #' ##  Width of the legend
+  )
+) 
+
+print(heatmap)
+```
+
+## print(heatmap)
+
+```{r}
+png("output/DMGs_heatmap.png",width = 6000, height = 7000, res = 600)
+draw(heatmap, annotation_legend_side =  "right")
+dev.off()
+```
+
